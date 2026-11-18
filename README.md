@@ -79,5 +79,43 @@ npm run dev
 - 列表接口统一返回 `{ items, total, page, size }`，动作接口统一返回 `{ ok, message }`。
 - 状态流转只允许在 `app/services` 里改，路由层不做业务判断。
 
+## 序号 23：指标血缘 ↔ 回放引擎的迁移切换
+
+血缘刷新以前只改版本号和更新时间，路径可能已经断链却仍显示「正常」。
+现在刷新会重新读取上下游引用、重算路径并核对完整性：
+
+- 存在断链时版本仍会提升，但状态只能是「断链」，不能写「正常」；
+- 同一 `batch_id` 的批量刷新每条记录只提升一次版本，重复提交幂等；
+- 每次版本更新都落一份路径快照（检查项、断链位置、路径签名），回放引擎引用这次重算结果；
+- 迁移切换支持两种取舍：`replace` 按新路径整体替换并切换当前消费版本；
+  `retain_old` 保留旧路径与当前版本，只新增一条修订记录；
+- 切换按 `switch_key` 幂等，并发重复提交只生效一次；事务失步时丢弃副本、回滚原版本；
+- 回放任务建单时重新校验血缘：断链版本只生成「验证失败」报告，任务不可执行；
+- 迁移台账、版本存量与部署面板通过接口对齐，供血缘页 / 回放页 / 迁移部署页核对。
+
+### 新增页面
+
+| 路径 | 页面 | 用途 |
+| --- | --- | --- |
+| `/lineage` | 指标血缘 | DAG 图谱、断链位置、版本存量、迁移台账、刷新与切换 |
+| `/replay` | 回放引擎 | 任务列表、血缘版本引用、执行/报告、血缘与报告一致性 |
+| `/migration_deploy` | 迁移部署 | 数据库部署写入的血缘存量、回放构建流水线、迁移台账 |
+
+### 联动接口
+
+| 方法 | 路径 | 说明 |
+| --- | --- | --- |
+| POST | `/api/lineage/refresh-all` | 批量刷新，`batch_id` 幂等 |
+| POST | `/api/lineage/{id}/refresh` | 单条刷新并核对链接 |
+| GET | `/api/lineage/{id}/graph` | 血缘 DAG（含断链位置） |
+| GET | `/api/lineage/{id}/verify` | 校验当前版本完整性 |
+| POST | `/api/lineage/switch-env` | 迁移切换，`mode=replace|retain_old` |
+| GET | `/api/lineage/migration-ledger` | 迁移台账与版本存量 |
+| GET | `/api/lineage/deployment-panel` | 部署面板（血缘 + 回放构建流水线） |
+| POST | `/api/replay/jobs` | 建回放任务，引用血缘当前版本 |
+| POST | `/api/replay/{id}/execute` | 执行回放（执行前后都会校验血缘） |
+| GET | `/api/replay/{id}/report` | 读取回放验证报告 |
+| GET | `/api/replay/consistency` | 血缘状态与回放报告一致性核对 |
+
 领域：数据工程
 子方向：数据分析与数据应用

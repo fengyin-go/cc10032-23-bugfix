@@ -585,31 +585,72 @@ def trace_metric_lineage(
     operators: list[str],
     output_targets: list[str],
 ) -> dict[str, Any]:
-    """追踪指标从源端到输出的全链路血缘。"""
-    lineage = {
-        "记录ID": f"lineage_{metric_name}",
-        "指标名称": metric_name,
-        "上游源端": "→".join(source_modules),
-        "中间算子": "→".join(operators),
-        "输出目标": "→".join(output_targets),
-        "更新时间": time.strftime("%Y-%m-%d"),
-        "版本号": f"v{int(time.time()) % 100}",
-        "status": "正常",
-        "pending": False,
-        "abnormal": False,
+    """追踪指标从源端到输出的全链路血缘。
+
+    与指标血缘服务共用同一套校验：每次写入前重新核对全部上下游链接，
+    存在断链时状态只能是「断链」，不得标记为「正常」。
+    """
+    from app.services.metric_lineage import MetricLineageService
+
+    service = MetricLineageService()
+    path = {
+        "sources": [str(item).strip() for item in source_modules if str(item).strip()],
+        "operators": [str(item).strip() for item in operators if str(item).strip()],
+        "outputs": [str(item).strip() for item in output_targets if str(item).strip()],
     }
-    existing = False
-    for row in store.rows("metric_lineage"):
-        if row.get("记录ID") == lineage["记录ID"]:
-            row.update(lineage)
-            existing = True
-            break
-    if not existing:
+    verification = service.verify_path(path)
+
+    record_id = f"lineage_{metric_name}"
+    existing_row = next(
+        (row for row in store.rows("metric_lineage") if row.get("记录ID") == record_id),
+        None,
+    )
+    version = f"v{int(existing_row.get('_version_number', 0)) + 1}" if existing_row else "v1"
+
+    lineage = {
+        "记录ID": record_id,
+        "指标名称": metric_name,
+        "上游源端": " → ".join(path["sources"]),
+        "中间算子": " → ".join(path["operators"]),
+        "输出目标": " → ".join(path["outputs"]),
+        "更新时间": time.strftime("%Y-%m-%d %H:%M:%S"),
+        "版本号": version,
+        "status": "正常" if verification["ok"] else "断链",
+        "pending": not verification["ok"],
+        "abnormal": not verification["ok"],
+        "_verified_path": path,
+        "_path_signature": verification["signature"],
+        "_link_checks": verification["checks"],
+        "_broken_links": verification["broken"],
+        "_last_verified_at": time.time(),
+    }
+    if existing_row is not None:
+        # 保留历史版本存量与切换幂等标记，只覆盖本次重算结果。
+        preserved = {
+            "_versions": existing_row.get("_versions", []),
+            "_revisions": existing_row.get("_revisions", []),
+            "_last_batch": existing_row.get("_last_batch"),
+        }
+        existing_row.update(lineage)
+        existing_row.update(preserved)
+    else:
         lineage["id"] = max(
             (int(r.get("id", 0)) for r in store.rows("metric_lineage")), default=0
         ) + 1
         store.rows("metric_lineage").append(lineage)
-    return lineage
+
+    target_row = next(
+        r for r in store.rows("metric_lineage") if r.get("记录ID") == record_id
+    )
+    service._apply_verification(
+        target_row,
+        verification,
+        batch_id=f"pipeline-{time.time_ns()}",
+        version=version,
+        environment="当前环境",
+        note="管道链路追踪重算路径",
+    )
+    return target_row
 
 
 # ---- 链路8: 端到端管道编排 ----
@@ -698,9 +739,9 @@ def run_end_to_end_pipeline(
     # ---- 链路7: 血缘追踪 ----
     lineage = trace_metric_lineage(
         "real_time_qps",
-        ["stream_source"],
-        ["calc_operator", "window_config", "sliding_index"],
-        ["sink_output", "aggregate_sink"],
+        ["流式源端样例2"],
+        ["计算算子样例3", "窗口配置样例2"],
+        ["结果落地样例2"],
     )
     report["chain7_lineage"] = lineage
 

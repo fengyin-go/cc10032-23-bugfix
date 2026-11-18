@@ -376,16 +376,27 @@ class TestSamplerTraceAndTopology:
         assert "current_qps" in result
 
     def test_lineage_tracing(self):
-        """血缘追踪应记录完整上下游链路。"""
+        """血缘追踪应记录完整上下游链路，且只引用真实存在的记录。"""
         lineage = trace_metric_lineage(
             "test_metric",
-            ["stream_source", "kafka_topic"],
-            ["calc_operator", "window_config"],
-            ["sink_output", "dashboard"],
+            ["流式源端样例2"],
+            ["计算算子样例3", "窗口配置样例2"],
+            ["结果落地样例2"],
         )
         assert lineage["记录ID"] is not None
         assert lineage["指标名称"] == "test_metric"
         assert lineage["status"] == "正常"
+
+    def test_lineage_tracing_broken_path(self):
+        """引用了不存在的上下游时，血缘不能标记为正常。"""
+        lineage = trace_metric_lineage(
+            "test_metric_broken",
+            ["stream_source", "kafka_topic"],
+            ["calc_operator", "window_config"],
+            ["sink_output", "dashboard"],
+        )
+        assert lineage["status"] == "断链"
+        assert lineage["_broken_links"]
 
 
 # ---------------------------------------------------------------------------
